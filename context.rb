@@ -125,7 +125,16 @@ module MyName
             def rotz=(v);  self.z_axis.rot = v;  end
 
 
+            # --- Видимость ---
+            def hidden
+                @instance.hidden?
+            end
 
+            def hidden=(value)
+                KCode.suppress(@instance) do
+                    @instance.hidden = value ? true : false
+                end
+            end
 
 
 
