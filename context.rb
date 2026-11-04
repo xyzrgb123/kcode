@@ -22,6 +22,20 @@ module MyName
                 @definition.get_attribute(DICT_NAME, CODE_KEY, '')
             end
 
+
+            def frozen?
+                @definition.get_attribute(DICT_NAME, 'frozen', true) ? true : false
+            end
+
+            def freeze!
+                @definition.set_attribute(DICT_NAME, 'frozen', true)
+            end
+
+            def unfreeze!
+                @definition.set_attribute(DICT_NAME, 'frozen', false)
+            end
+
+
             def execute
                 unless valid?
                     raise '[KCode] Экземпляр компонента был удалён. ' \
@@ -32,16 +46,56 @@ module MyName
                 return if code_to_run.nil? || code_to_run.empty?
 
                 mdl = @instance.model
-                mdl.start_operation('KCode Execute', true)
-                begin
-                    instance_eval(code_to_run)
-                rescue => e
-                    puts "[KCode] #{e.class}: #{e.message}"
-                    puts e.backtrace.first(5).join("\n")
-                ensure
-                    mdl.commit_operation
+                in_edit_in_place = mdl.active_path && !mdl.active_path.empty?
+
+                if in_edit_in_place
+                    # Мы внутри edit-in-place. Не открываем новую транзакцию —
+                    # иначе SketchUp сбивает визуализацию входа в компонент.
+                    begin
+                        instance_eval(code_to_run)
+                    rescue => e
+                        puts "[KCode] #{e.class}: #{e.message}"
+                        puts e.backtrace.first(5).join("\n")
+                    end
+                else
+                    mdl.start_operation('KCode Execute', true)
+                    begin
+                        instance_eval(code_to_run)
+                    rescue => e
+                        puts "[KCode] #{e.class}: #{e.message}"
+                        puts e.backtrace.first(5).join("\n")
+                    ensure
+                        mdl.commit_operation
+                    end
                 end
             end
+
+            # Принудительно пересобрать трансформацию из атрибутов rotx/roty/rotz.
+            # Вызывается из "Применить", чтобы сбросить ручной поворот.
+            # Из наблюдателей НЕ вызывается — иначе при входе в компонент
+            # SketchUp сбивает edit-in-place.
+            def force_apply_rotations!
+                return unless code_uses_rotations?
+
+                KCode.suppress(@instance) do
+                    rebuild_with_rotations
+                end
+            end
+
+            def code_uses_rotations?
+                c = code
+                return false if c.nil? || c.empty?
+                c.match?(/\brot[xXyYzZ]\b/)
+            end
+
+
+
+
+
+
+
+
+
 
             # --- Оси ---
             def x_axis; @axes[:x] ||= Axis.new(self, :x); end
@@ -61,6 +115,19 @@ module MyName
             def y=(v);     self.y_axis.pos = v;  end
             def z;         z_axis.pos;      end
             def z=(v);     self.z_axis.pos = v;  end
+
+            # --- Повороты (углы в градусах) ---
+            def rotx;      x_axis.rot;      end
+            def rotx=(v);  self.x_axis.rot = v;  end
+            def roty;      y_axis.rot;      end
+            def roty=(v);  self.y_axis.rot = v;  end
+            def rotz;      z_axis.rot;      end
+            def rotz=(v);  self.z_axis.rot = v;  end
+
+
+
+
+
 
             # --- Стороны ---
             def left_side;   @sides[:left]   ||= Side.new(self, :left);   end
@@ -237,6 +304,58 @@ module MyName
                     @instance.transformation = translation * tr
                 end
             end
+
+            # Угол читаем из атрибута определения — это "заданное" значение.
+            # После ручного поворота инструментом, оно не меняется.
+            def rotation(axis)
+                @definition.get_attribute(DICT_NAME, "rot#{axis}", 0.0).to_f
+            end
+
+            def set_rotation(axis, value)
+                current = rotation(axis)
+                return if (current - value.to_f).abs < 0.001
+
+                KCode.suppress(@instance) do
+                    @definition.set_attribute(DICT_NAME, "rot#{axis}", value.to_f)
+                    rebuild_with_rotations
+                end
+            end
+
+            def rebuild_with_rotations
+                tr = @instance.transformation
+                origin = tr.origin
+                sx = tr.xaxis.length
+                sy = tr.yaxis.length
+                sz = tr.zaxis.length
+                return if sx <= 0 || sy <= 0 || sz <= 0
+
+                rx = @definition.get_attribute(DICT_NAME, 'rotx', 0.0).to_f
+                ry = @definition.get_attribute(DICT_NAME, 'roty', 0.0).to_f
+                rz = @definition.get_attribute(DICT_NAME, 'rotz', 0.0).to_f
+
+                zero = Geom::Point3d.new(0, 0, 0)
+                r_x = Geom::Transformation.rotation(zero, Geom::Vector3d.new(1, 0, 0), rx.degrees)
+                r_y = Geom::Transformation.rotation(zero, Geom::Vector3d.new(0, 1, 0), ry.degrees)
+                r_z = Geom::Transformation.rotation(zero, Geom::Vector3d.new(0, 0, 1), rz.degrees)
+                scaling = Geom::Transformation.scaling(sx, sy, sz)
+                translation = Geom::Transformation.new(origin)
+
+                new_tr = translation * r_x * r_y * r_z * scaling
+
+                # Не переназначаем, если результат совпадает с текущим:
+                # иначе SketchUp при входе в компонент получает лишнее
+                # уведомление "трансформация изменена" и сбивает edit-in-place.
+                current_arr = tr.to_a
+                new_arr     = new_tr.to_a
+                same = current_arr.each_with_index.all? do |v, i|
+                    (v - new_arr[i]).abs < 1e-6
+                end
+                return if same
+
+                @instance.transformation = new_tr
+            end
+
+
 
             def side_gap(side)
                 axis, edge = Side::SIDES.fetch(side)

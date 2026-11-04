@@ -18,6 +18,7 @@ load File.join(__dir__, 'side.rb')
 load File.join(__dir__, 'context.rb')
 load File.join(__dir__, 'observers.rb')
 load File.join(__dir__, 'editor.rb')
+load File.join(__dir__, 'toolbar.rb')
 
 # --- Подписка наблюдателей на активную модель ---
 if $kcode_placement_observer
@@ -61,6 +62,15 @@ end
 $kcode_entities_added_observer = MyName::KCode::EntitiesAddedObserver.new
 Sketchup.active_model.entities.add_observer($kcode_entities_added_observer)
 
+if $kcode_selection_observer
+    begin
+        Sketchup.active_model.selection.remove_observer($kcode_selection_observer)
+    rescue StandardError
+    end
+end
+$kcode_selection_observer = MyName::KCode::SelectionObserver.new
+Sketchup.active_model.selection.add_observer($kcode_selection_observer)
+
 # --- Меню ---
 unless $kcode_menu_registered
     extensions_menu = UI.menu('Extensions')
@@ -69,5 +79,8 @@ unless $kcode_menu_registered
     end
     $kcode_menu_registered = true
 end
+
+# --- Тулбар ---
+MyName::KCode.show_toolbar
 
 puts '[KCode] Загружено: ' + Dir.glob(File.join(__dir__, '*.rb')).map { |f| File.basename(f) }.sort.join(', ')

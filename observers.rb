@@ -57,8 +57,10 @@ module MyName
                 return unless inst.valid?
                 return if @busy[inst.entityID]
                 return if KCode.suppressed?(inst)
+                return unless KCodeContext.new(inst).frozen?
 
                 ctx = KCodeContext.new(inst)
+                
                 return if ctx.code.nil? || ctx.code.empty?
 
                 @busy[inst.entityID] = true
@@ -85,6 +87,7 @@ module MyName
                     model.entities.grep(Sketchup::ComponentInstance).each do |inst|
                         next unless inst.valid?
                         next if KCode.suppressed?(inst)
+                        next unless KCodeContext.new(inst).frozen?
                         ctx = KCodeContext.new(inst)
                         next if ctx.code.nil? || ctx.code.empty?
                         begin
@@ -106,5 +109,27 @@ module MyName
                 entity.add_observer($kcode_instance_observer) if $kcode_instance_observer
             end
         end
+
+
+        class SelectionObserver < Sketchup::SelectionObserver
+            def onSelectionBulkChange(_selection)
+                KCode.handle_selection_changed
+            end
+
+            def onSelectionAdded(_selection, _entity)
+                KCode.handle_selection_changed
+            end
+
+            def onSelectionRemoved(_selection, _entity)
+                KCode.handle_selection_changed
+            end
+
+            def onSelectionCleared(_selection)
+                KCode.handle_selection_changed
+            end
+        end
+
+
+
     end
 end

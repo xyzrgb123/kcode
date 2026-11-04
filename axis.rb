@@ -39,6 +39,16 @@ module MyName
             def scale
                 @context.local_scale(@axis)
             end
+
+            def rot
+                @context.rotation(@axis)
+            end
+
+            def rot=(value)
+                @context.set_rotation(@axis, value)
+            end
+
+
         end
     end
 end

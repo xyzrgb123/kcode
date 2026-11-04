@@ -2,7 +2,7 @@ require 'json'
 
 module MyName
     module KCode
-        @editing = { instance: nil }
+        @editing = { instance: nil, pending_code: nil, clipboard: nil, mode: :component }
 
         def self.show_editor
             if $kcode_dialog
@@ -20,177 +20,198 @@ module MyName
                 resizable:       true,
                 style:           UI::HtmlDialog::STYLE_DIALOG
             )
-            $kcode_dialog.set_html(editor_html)
-            $kcode_dialog.add_action_callback('kcode_save')    { |_, code| handle_save(code) }
-            $kcode_dialog.add_action_callback('kcode_apply')   { |_, code| handle_apply(code) }
-            $kcode_dialog.add_action_callback('kcode_refresh') { |_| refresh_editor }
-
-            $kcode_dialog.add_action_callback('kcode_log')     { |_, msg| puts "[KCode/js] #{msg}" }
+            $kcode_dialog.set_file(File.join(__dir__, 'ui', 'editor.html'))
+            $kcode_dialog.add_action_callback('kcode_apply')          { |_, code| handle_apply(code) }
+            $kcode_dialog.add_action_callback('kcode_notify_change')  { |_, code| handle_code_changed(code) }
+            $kcode_dialog.add_action_callback('kcode_toggle_freeze')  { |_| handle_toggle_freeze }
+            $kcode_dialog.add_action_callback('kcode_copy')           { |_, code| handle_copy(code) }
+            $kcode_dialog.add_action_callback('kcode_paste')          { |_| handle_paste }
+            $kcode_dialog.add_action_callback('kcode_save_font_size') { |_, px| handle_save_font_size(px) }
+            $kcode_dialog.add_action_callback('kcode_switch_mode')    { |_, mode| handle_switch_mode(mode) }
+            $kcode_dialog.add_action_callback('kcode_log')            { |_, msg| puts "[KCode/js] #{msg}" }
             $kcode_dialog.set_on_closed do
+                save_pending_code
                 $kcode_dialog = nil
             end
             $kcode_dialog.show
-
-
-
-            refresh_editor
+            UI.start_timer(0.3, false) { refresh_editor }
         end
 
         def self.refresh_editor
             return unless $kcode_dialog
 
-            # Кнопка "Из компонента" ВСЕГДА смотрит на текущее выделение
-            sel = Sketchup.active_model.selection.first
-            inst = (sel.is_a?(Sketchup::ComponentInstance) && sel.valid?) ? sel : nil
+            font_size = Sketchup.read_default('kcode', 'font_size', 13).to_i
+            $kcode_dialog.execute_script("window.setFontSize(#{font_size});")
 
+            update_tab_names
+
+            if @editing[:mode] == :model
+                show_model_code
+            else
+                show_component_code
+            end
+
+            $kcode_dialog.execute_script("window.setMode(#{@editing[:mode].to_s.to_json});")
+        end
+
+        def self.update_tab_names
+            inst = single_selected_component
+            if inst
+                $kcode_dialog.execute_script("window.setComponentName(#{inst.definition.name.to_json}, true);")
+            else
+                $kcode_dialog.execute_script("window.setComponentName('не выбран', false);")
+            end
+        end
+
+        def self.show_component_code
+            inst = single_selected_component
             if inst
                 @editing[:instance] = inst
-                ctx  = KCodeContext.new(inst)
-                info = "#{inst.definition.name}   (id #{inst.entityID})"
-                $kcode_dialog.execute_script("window.setInfo(#{info.to_json}, true);")
+                @editing[:pending_code] = nil
+                ctx = KCodeContext.new(inst)
                 $kcode_dialog.execute_script("window.setCode(#{ctx.code.to_s.to_json});")
+                $kcode_dialog.execute_script("window.setFrozen(#{ctx.frozen?});")
             else
                 @editing[:instance] = nil
-                $kcode_dialog.execute_script("window.setInfo('Компонент не выбран', false);")
+                @editing[:pending_code] = nil
                 $kcode_dialog.execute_script("window.setCode('');")
+                $kcode_dialog.execute_script("window.setFrozen(null);")
             end
         end
 
-        # Возвращает компонент для работы: сначала закэшированный (если жив),
-        # потом — из текущего выделения.
-        def self.current_target_instance
-            cached = @editing[:instance]
-            return cached if cached && cached.valid?
-
-            sel = Sketchup.active_model.selection.first
-            return sel if sel.is_a?(Sketchup::ComponentInstance) && sel.valid?
-
-            nil
+        def self.show_model_code
+            ctx = ModelContext.new(Sketchup.active_model)
+            @editing[:pending_code] = nil
+            $kcode_dialog.execute_script("window.setCode(#{ctx.code.to_s.to_json});")
         end
 
-        def self.handle_save(code)
-            inst = current_target_instance
-            unless inst
-                puts '[KCode] Нет выбранного компонента — некуда сохранять.'
+        def self.single_selected_component
+            sel = Sketchup.active_model.selection
+            return nil unless sel.size == 1
+            inst = sel[0]
+            (inst.is_a?(Sketchup::ComponentInstance) && inst.valid?) ? inst : nil
+        end
+
+        def self.handle_code_changed(code)
+            @editing[:pending_code] = code
+        end
+
+        def self.save_pending_code
+            pending = @editing[:pending_code]
+            return if pending.nil?
+            @editing[:pending_code] = nil
+
+            if @editing[:mode] == :model
+                ModelContext.new(Sketchup.active_model).save_code(pending)
+                puts '[KCode] Автосохранение: модель'
+            else
+                inst = @editing[:instance]
+                return unless inst && inst.valid?
+                KCodeContext.new(inst).save_code(pending)
+                puts "[KCode] Автосохранение: #{inst.definition.name}"
+            end
+        end
+
+        def self.handle_selection_changed
+            return unless $kcode_dialog
+
+            if @editing[:mode] == :model
+                # В режиме модели не трогаем код, но обновляем имя вкладки компонента
+                inst = single_selected_component
+                if inst
+                    $kcode_dialog.execute_script("window.setComponentName(#{inst.definition.name.to_json}, true);")
+                else
+                    $kcode_dialog.execute_script("window.setComponentName('не выбран', false);")
+                end
                 return
             end
-            KCodeContext.new(inst).save_code(code)
-            puts "[KCode] Сохранено в #{inst.definition.name} (id #{inst.entityID})"
+
+            save_pending_code
+            refresh_editor
+        end
+
+        def self.handle_switch_mode(mode)
+            return unless $kcode_dialog
+
+            new_mode = mode.to_s == 'model' ? :model : :component
+            return if new_mode == @editing[:mode]
+
+            save_pending_code
+            @editing[:mode] = new_mode
+            refresh_editor
         end
 
         def self.handle_apply(code)
-            inst = current_target_instance
-            unless inst
+            if @editing[:mode] == :model
+                ctx = ModelContext.new(Sketchup.active_model)
+                ctx.save_code(code)
+                @editing[:pending_code] = nil
+                ctx.execute
+                puts '[KCode] Применено к модели'
+                return
+            end
+
+            inst = @editing[:instance]
+            unless inst && inst.valid?
                 puts '[KCode] Нет выбранного компонента — некуда применять.'
                 return
             end
+
             ctx = KCodeContext.new(inst)
             ctx.save_code(code)
+            @editing[:pending_code] = nil
+            ctx.force_apply_rotations!
             ctx.execute
             puts "[KCode] Применено к #{inst.definition.name} (id #{inst.entityID})"
+
         end
 
-        def self.editor_html
-            <<~HTML
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="utf-8">
-                    <style>
-                        body { font-family: sans-serif; margin: 0; padding: 8px; background: #f0f0f0; }
-                        #info {
-                            padding: 6px 10px; background: #fff; border: 1px solid #ccc;
-                            margin-bottom: 6px; font-size: 12px; border-radius: 2px;
-                        }
-                        #info.off { color: #a00; }
-                        #code {
-                            width: 100%; box-sizing: border-box; height: 300px;
-                            font-family: 'Consolas', 'Menlo', 'Courier New', monospace;
-                            font-size: 13px; line-height: 1.4;
-                            padding: 8px; border: 1px solid #ccc; border-radius: 2px;
-                            resize: none; tab-size: 4;
-                        }
-                        #buttons { margin-top: 8px; }
-                        button {
-                            padding: 6px 14px; margin-right: 6px;
-                            cursor: pointer; font-size: 13px;
-                        }
-                        button:disabled { cursor: default; opacity: 0.5; }
-                    </style>
-                </head>
-                <body>
-                    <div id="info" class="off">Компонент не выбран</div>
-                    <textarea id="code" spellcheck="false" placeholder="self.lenx  = self.parent_context.lenx / 2&#10;self.left  = 10.cm&#10;self.top   = 5.cm"></textarea>
-                    <div id="buttons">
-                        <button id="save">Сохранить</button>
-                        <button id="apply">Применить</button>
-                        <button id="refresh">Из компонента</button>
-                    </div>
-                    <script>
-                        (function() {
-                            var codeEl     = document.getElementById('code');
-                            var infoEl     = document.getElementById('info');
-                            var saveBtn    = document.getElementById('save');
-                            var applyBtn   = document.getElementById('apply');
-                            var refreshBtn = document.getElementById('refresh');
+        def self.handle_toggle_freeze
+            return if @editing[:mode] == :model
 
-                            function log(msg) {
-                                if (window.sketchup && sketchup.kcode_log) {
-                                    sketchup.kcode_log(msg);
-                                }
-                            }
+            inst = @editing[:instance]
+            unless inst && inst.valid?
+                puts '[KCode] Нет выбранного компонента — нечего замораживать.'
+                return
+            end
 
-                            window.onerror = function(msg, url, line) {
-                                log('JS ERROR: ' + msg + ' at ' + (url || '?') + ':' + (line || '?'));
-                            };
+            ctx = KCodeContext.new(inst)
+            if ctx.frozen?
+                ctx.unfreeze!
+                puts "[KCode] Разморожен: #{inst.definition.name}"
+            else
+                ctx.freeze!
+                ctx.force_apply_rotations!
+                puts "[KCode] Заморожен: #{inst.definition.name}"
+            end
 
-                            window.setInfo = function(text, selected) {
-                                infoEl.textContent = text;
-                                if (selected) {
-                                    infoEl.classList.remove('off');
-                                } else {
-                                    infoEl.classList.add('off');
-                                }
-                                saveBtn.disabled  = !selected;
-                                applyBtn.disabled = !selected;
-                            };
+            $kcode_dialog.execute_script("window.setFrozen(#{ctx.frozen?});") if $kcode_dialog
+        end
 
-                            window.setCode = function(text) {
-                                codeEl.value = text || '';
-                            };
+        def self.handle_copy(code)
+            @editing[:clipboard] = code
+            begin
+                UI.set_clipboard(code)
+            rescue StandardError
+            end
+            puts "[KCode] Скопировано (#{code.length} символов)"
+        end
 
-                            saveBtn.addEventListener('click', function() {
-                                log('save clicked');
-                                sketchup.kcode_save(codeEl.value);
-                            });
+        def self.handle_paste
+            text = @editing[:clipboard]
+            if text.nil? || text.empty?
+                puts '[KCode] Буфер пуст — сначала скопируйте код.'
+                return
+            end
+            $kcode_dialog.execute_script("window.setCode(#{text.to_json});") if $kcode_dialog
+            @editing[:pending_code] = text
+            puts "[KCode] Вставлено (#{text.length} символов)"
+        end
 
-                            applyBtn.addEventListener('click', function() {
-                                log('apply clicked');
-                                sketchup.kcode_apply(codeEl.value);
-                            });
-
-                            refreshBtn.addEventListener('click', function() {
-                                log('refresh clicked');
-                                sketchup.kcode_refresh();
-                            });
-
-                            // Tab = 4 пробела
-                            codeEl.addEventListener('keydown', function(e) {
-                                if (e.key === 'Tab') {
-                                    e.preventDefault();
-                                    var start = this.selectionStart;
-                                    var end   = this.selectionEnd;
-                                    this.value = this.value.substring(0, start) + '    ' + this.value.substring(end);
-                                    this.selectionStart = this.selectionEnd = start + 4;
-                                }
-                            });
-
-                            log('editor loaded');
-                        })();
-                    </script>
-                </body>
-                </html>
-            HTML
+        def self.handle_save_font_size(px)
+            size = px.to_i
+            return if size < 9 || size > 28
+            Sketchup.write_default('kcode', 'font_size', size)
         end
     end
 end
