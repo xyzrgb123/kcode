@@ -136,7 +136,35 @@ module MyName
                 end
             end
 
+            # --- Материал ---
+            def material=(value)
+                KCode.suppress(@instance) do
+                    if value.nil?
+                        @instance.material = nil
+                        return
+                    end
 
+                    str = value.to_s.strip
+                    if str.empty?
+                        @instance.material = nil
+                        return
+                    end
+
+                    if str.start_with?('#')
+                        color = Sketchup::Color.new(str)
+                        mat = find_or_create_material_by_color(color)
+                        @instance.material = mat
+                    else
+                        mat = @instance.model.materials[str]
+                        if mat
+                            @instance.material = mat
+                        else
+                            puts "[KCode] Материал '#{str}' не найден — ставлю дефолтный"
+                            @instance.material = nil
+                        end
+                    end
+                end
+            end
 
             # --- Стороны ---
             def left_side;   @sides[:left]   ||= Side.new(self, :left);   end
@@ -413,6 +441,18 @@ module MyName
                 end
                 result
             end
+
+            def find_or_create_material_by_color(color)
+                model = @instance.model
+                hex = color.to_a[0..2].map { |c| c.to_s(16).rjust(2, '0') }.join
+                name = "KCode_#{hex}"
+                mat = model.materials[name]
+                return mat if mat
+                mat = model.materials.add(name)
+                mat.color = color
+                mat
+            end
+
 
             def find_immediate_parent(inst)
                 path = @instance.model.active_path
