@@ -27,6 +27,21 @@ module MyName
                 @model.set_attribute(MODEL_DICT, key, value)
             end
 
+            def global_scale_mask
+                @model.get_attribute(MODEL_DICT, 'global_scale_mask', 0).to_i
+            end
+
+            def set_global_scale_mask_bits(bits, on)
+                current = global_scale_mask
+                new_mask = on ? (current | bits) : (current & ~bits)
+                @model.set_attribute(MODEL_DICT, 'global_scale_mask', new_mask)
+                new_mask
+            end
+
+
+
+
+
             def patro;          nil; end
             def parent_context; nil; end
 

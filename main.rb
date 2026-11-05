@@ -1,12 +1,19 @@
 require 'sketchup.rb'
 
-# --- Закрыть старый диалог, если был ---
+# --- Закрыть старые диалоги, если были ---
 if $kcode_dialog
     begin
         $kcode_dialog.close
     rescue StandardError
     end
     $kcode_dialog = nil
+end
+if $kcode_mask_dialog
+    begin
+        $kcode_mask_dialog.close
+    rescue StandardError
+    end
+    $kcode_mask_dialog = nil
 end
 
 # --- Загрузка модулей (порядок важен) ---
@@ -18,6 +25,7 @@ load File.join(__dir__, 'side.rb')
 load File.join(__dir__, 'context.rb')
 load File.join(__dir__, 'observers.rb')
 load File.join(__dir__, 'editor.rb')
+load File.join(__dir__, 'mask_dialog.rb')
 load File.join(__dir__, 'toolbar.rb')
 
 # --- Подписка наблюдателей на активную модель ---
@@ -71,7 +79,7 @@ end
 $kcode_selection_observer = MyName::KCode::SelectionObserver.new
 Sketchup.active_model.selection.add_observer($kcode_selection_observer)
 
-# --- Меню ---
+# --- Меню (только редактор; маска — через тулбар) ---
 unless $kcode_menu_registered
     extensions_menu = UI.menu('Extensions')
     extensions_menu.add_item('KCode: редактор кода компонента') do
