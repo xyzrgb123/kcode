@@ -1,5 +1,3 @@
-# KCodeContext (собирает всё вместе)
-
 module MyName
     module KCode
         class KCodeContext
@@ -22,7 +20,7 @@ module MyName
                 @definition.get_attribute(DICT_NAME, CODE_KEY, '')
             end
 
-
+            # --- Заморозка ---
             def frozen?
                 @definition.get_attribute(DICT_NAME, 'frozen', true) ? true : false
             end
@@ -35,7 +33,7 @@ module MyName
                 @definition.set_attribute(DICT_NAME, 'frozen', false)
             end
 
-
+            # --- Выполнение кода ---
             def execute
                 unless valid?
                     raise '[KCode] Экземпляр компонента был удалён. ' \
@@ -49,18 +47,11 @@ module MyName
                 in_edit_in_place = mdl.active_path && !mdl.active_path.empty?
 
                 if in_edit_in_place
-                    # Мы внутри edit-in-place. Не открываем новую транзакцию —
-                    # иначе SketchUp сбивает визуализацию входа в компонент.
-                    begin
-                        instance_eval(code_to_run)
-                    rescue => e
-                        puts "[KCode] #{e.class}: #{e.message}"
-                        puts e.backtrace.first(5).join("\n")
-                    end
+                    run_code_for_all(code_to_run)
                 else
                     mdl.start_operation('KCode Execute', true)
                     begin
-                        instance_eval(code_to_run)
+                        run_code_for_all(code_to_run)
                     rescue => e
                         puts "[KCode] #{e.class}: #{e.message}"
                         puts e.backtrace.first(5).join("\n")
@@ -70,13 +61,9 @@ module MyName
                 end
             end
 
-            # Принудительно пересобрать трансформацию из атрибутов rotx/roty/rotz.
-            # Вызывается из "Применить", чтобы сбросить ручной поворот.
-            # Из наблюдателей НЕ вызывается — иначе при входе в компонент
-            # SketchUp сбивает edit-in-place.
+            # --- Принудительное применение поворотов ---
             def force_apply_rotations!
                 return unless code_uses_rotations?
-
                 KCode.suppress(@instance) do
                     rebuild_with_rotations
                 end
@@ -87,15 +74,6 @@ module MyName
                 return false if c.nil? || c.empty?
                 c.match?(/\brot[xXyYzZ]\b/)
             end
-
-
-
-
-
-
-
-
-
 
             # --- Оси ---
             def x_axis; @axes[:x] ||= Axis.new(self, :x); end
@@ -116,14 +94,13 @@ module MyName
             def z;         z_axis.pos;      end
             def z=(v);     self.z_axis.pos = v;  end
 
-            # --- Повороты (углы в градусах) ---
+            # --- Повороты ---
             def rotx;      x_axis.rot;      end
             def rotx=(v);  self.x_axis.rot = v;  end
             def roty;      y_axis.rot;      end
             def roty=(v);  self.y_axis.rot = v;  end
             def rotz;      z_axis.rot;      end
             def rotz=(v);  self.z_axis.rot = v;  end
-
 
             # --- Видимость ---
             def hidden
@@ -137,6 +114,12 @@ module MyName
             end
 
             # --- Материал ---
+            def material
+                mat = @instance.material
+                return nil unless mat
+                mat.name
+            end
+
             def material=(value)
                 KCode.suppress(@instance) do
                     if value.nil?
@@ -163,6 +146,25 @@ module MyName
                             @instance.material = nil
                         end
                     end
+                end
+            end
+
+            # --- Копии ---
+            def copy
+                @instance.get_attribute(DICT_NAME, 'copy_index', 0).to_i
+            end
+
+            def copies
+                @instance.get_attribute(DICT_NAME, 'copies', 0).to_i
+            end
+
+            def copies=(n)
+                return if copy > 0
+                n = n.to_i
+                return if n < 0
+                KCode.suppress(@instance) do
+                    @instance.set_attribute(DICT_NAME, 'copies', n)
+                    sync_copies_to(n)
                 end
             end
 
@@ -225,7 +227,7 @@ module MyName
                 @instance
             end
 
-            # --- Вспомогательные методы (вызывают Axis и Side) ---
+            # --- Вспомогательные (публичные) ---
             def bounds_dim(axis)
                 case axis
                 when :x then @definition.bounds.width
@@ -342,8 +344,6 @@ module MyName
                 end
             end
 
-            # Угол читаем из атрибута определения — это "заданное" значение.
-            # После ручного поворота инструментом, оно не меняется.
             def rotation(axis)
                 @definition.get_attribute(DICT_NAME, "rot#{axis}", 0.0).to_f
             end
@@ -379,9 +379,6 @@ module MyName
 
                 new_tr = translation * r_x * r_y * r_z * scaling
 
-                # Не переназначаем, если результат совпадает с текущим:
-                # иначе SketchUp при входе в компонент получает лишнее
-                # уведомление "трансформация изменена" и сбивает edit-in-place.
                 current_arr = tr.to_a
                 new_arr     = new_tr.to_a
                 same = current_arr.each_with_index.all? do |v, i|
@@ -391,8 +388,6 @@ module MyName
 
                 @instance.transformation = new_tr
             end
-
-
 
             def side_gap(side)
                 axis, edge = Side::SIDES.fetch(side)
@@ -428,18 +423,56 @@ module MyName
                 end
             end
 
+            # --- Выполнить код только для себя, без рекурсии по копиям ---
+            def execute_code_only(code)
+                run_code_for_all(code)
+            end
+
             private
 
-            def find_parent_chain
-                result = []
-                current = @instance
-                loop do
-                    parent = find_immediate_parent(current)
-                    break if parent.nil?
-                    result << parent
-                    current = parent
+            def run_code_for_all(code)
+                if copy > 0
+                    master_id = @instance.get_attribute(DICT_NAME, 'master_id', nil)
+                    if master_id
+                        master = find_entity_by_id(master_id)
+                        if master && master.valid?
+                            KCodeContext.new(master).execute_code_only(code)
+                        end
+                    end
+                    return
                 end
-                result
+
+                instance_eval(code)
+                force_apply_rotations!
+
+                find_copies.each do |c|
+                    next unless c.valid?
+                    cctx = KCodeContext.new(c)
+                    begin
+                        cctx.instance_eval(code)
+                    rescue => e
+                        puts "[KCode/copy #{c.entityID}] #{e.class}: #{e.message}"
+                    ensure
+                        cctx.force_apply_rotations!
+                    end
+                end
+            end
+
+            def find_entity_by_id(id)
+                result = []
+                walk_entities_for_id(model.entities, id, result)
+                result.first
+            end
+
+            def walk_entities_for_id(entities, id, result)
+                entities.each do |e|
+                    return if result.first
+                    result << e if e.entityID == id
+                    next unless result.first.nil?
+                    if e.is_a?(Sketchup::ComponentInstance) || e.is_a?(Sketchup::Group)
+                        walk_entities_for_id(e.definition.entities, id, result)
+                    end
+                end
             end
 
             def find_or_create_material_by_color(color)
@@ -453,6 +486,54 @@ module MyName
                 mat
             end
 
+            def parent_entities
+                p = patro
+                p ? p.definition.entities : model.entities
+            end
+
+            def find_copies
+                parent = parent_entities
+                return [] if parent.nil?
+                master_id = @instance.entityID
+                parent.grep(Sketchup::ComponentInstance).select do |c|
+                    next false unless c.valid?
+                    c.get_attribute(DICT_NAME, 'master_id', nil) == master_id &&
+                        c.get_attribute(DICT_NAME, 'copy_index', 0).to_i > 0
+                end.sort_by { |c| c.get_attribute(DICT_NAME, 'copy_index', 0).to_i }
+            end
+
+            def create_copy(index)
+                parent = parent_entities
+                return nil if parent.nil?
+                new_inst = parent.add_instance(@instance.definition, @instance.transformation)
+                new_inst.set_attribute(DICT_NAME, 'master_id', @instance.entityID)
+                new_inst.set_attribute(DICT_NAME, 'copy_index', index)
+                new_inst
+            rescue => e
+                puts "[KCode/copy] #{e.class}: #{e.message}"
+                nil
+            end
+
+            def sync_copies_to(n)
+                current = find_copies
+                if current.size < n
+                    (current.size...n).each { |i| create_copy(i + 1) }
+                elsif current.size > n
+                    current[n..-1].each { |c| c.erase! if c.valid? }
+                end
+            end
+
+            def find_parent_chain
+                result = []
+                current = @instance
+                loop do
+                    parent = find_immediate_parent(current)
+                    break if parent.nil?
+                    result << parent
+                    current = parent
+                end
+                result
+            end
 
             def find_immediate_parent(inst)
                 path = @instance.model.active_path
