@@ -75,33 +75,21 @@ module MyName
                 c.match?(/\brot[xXyYzZ]\b/)
             end
 
-            # Автоматически скрывает маркеры scale tool по осям,
-            # для которых в коде задан размер (self.lenx/leny/lenz).
-            # Плоскости и угловой маркер скрываются автоматически,
-            # если скрыты соответствующие оси.
-            def auto_update_scale_mask
-                c = code
-                global = model.get_attribute(MODEL_DICT, 'global_scale_mask', 0).to_i
-
-                lock_x = c && !c.empty? && c.match?(/\bself\.lenx\s*=/)
-                lock_y = c && !c.empty? && c.match?(/\bself\.leny\s*=/)
-                lock_z = c && !c.empty? && c.match?(/\bself\.lenz\s*=/)
-
-                mask = global
-                mask |= 1 if lock_x
-                mask |= 2 if lock_y
-                mask |= 4 if lock_z
-                mask |= 8  if lock_x || lock_z
-                mask |= 16 if lock_y || lock_z
-                mask |= 32 if lock_x || lock_y
-                mask |= 64 if lock_x || lock_y || lock_z
-
-                @definition.behavior.no_scale_mask = mask
-                model.active_view.invalidate
+            # --- Клики ---
+            def click(&block)
+                @click_handler ||= ClickHandler.new
+                if block
+                    @click_handler.call(&block)
+                    return @click_handler
+                end
+                @click_handler
             end
 
-
-
+            def code_uses_clicks?
+                c = code
+                return false if c.nil? || c.empty?
+                c.match?(/\bself\.click\b/)
+            end
 
             # --- Оси ---
             def x_axis; @axes[:x] ||= Axis.new(self, :x); end
@@ -449,6 +437,28 @@ module MyName
                     new_pos = p_width - local_gap - bounds_max(axis) * scale
                     set_position(axis, new_pos)
                 end
+            end
+
+            # --- Автоматическое скрытие маркеров scale tool ---
+            def auto_update_scale_mask
+                c = code
+                global = model.get_attribute(MODEL_DICT, 'global_scale_mask', 0).to_i
+
+                lock_x = c && !c.empty? && c.match?(/\bself\.lenx\s*=/)
+                lock_y = c && !c.empty? && c.match?(/\bself\.leny\s*=/)
+                lock_z = c && !c.empty? && c.match?(/\bself\.lenz\s*=/)
+
+                mask = global
+                mask |= 1 if lock_x
+                mask |= 2 if lock_y
+                mask |= 4 if lock_z
+                mask |= 8  if lock_x || lock_z
+                mask |= 16 if lock_y || lock_z
+                mask |= 32 if lock_x || lock_y
+                mask |= 64 if lock_x || lock_y || lock_z
+
+                @definition.behavior.no_scale_mask = mask
+                model.active_view.invalidate
             end
 
             # --- Выполнить код только для себя, без рекурсии по копиям ---
